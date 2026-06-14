@@ -1,0 +1,242 @@
+import os
+import json
+import requests
+import trafilatura
+from dotenv import load_dotenv
+from openai import OpenAI
+from textual.app import App, ComposeResult
+from textual.binding import Binding
+from textual.widgets import Header, Footer, Input, RichLog
+from textual.containers import Horizontal
+
+load_dotenv()
+
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.environ.get("OPENROUTER_API_KEY"),
+)
+
+SERPER_API_KEY = os.environ.get("SERPER_API_KEY")
+
+# --- STABLE PRODUCTION TOOLS ---
+
+def real_web_search(query: str, num_results: int = 4) -> str:
+    """Search Google using Serper.dev and return live result snippets."""
+    if not SERPER_API_KEY:
+        return "Error: SERPER_API_KEY is not set in your .env file."
+    try:
+        response = requests.post(
+            "https://google.serper.dev/search",
+            headers={"X-API-KEY": SERPER_API_KEY, "Content-Type": "application/json"},
+            json={"q": query, "num": num_results},
+            timeout=10,
+        )
+        response.raise_for_status()
+        data = response.json()
+        
+        # Safety Guard: If API returned empty data or invalid JSON format
+        if not data or not isinstance(data, dict):
+            return "No live search results found (Invalid or empty API response)."
+        
+        results = []
+        
+        # Check if Google gave us a direct Answer Box
+        if "answerBox" in data:
+            answerBox = data.get("answerBox", {})
+            if isinstance(answerBox, dict):
+                answer = answerBox.get("answer") or answerBox.get("snippet")
+                if answer:
+                    results.append(f"DIRECT ANSWER BOX: {answer}\n---")
+                
+        for item in data.get("organic", []):
+            if isinstance(item, dict):
+                results.append(f"Title: {item.get('title')}\nURL: {item.get('link')}\nSnippet: {item.get('snippet')}\n---")
+                
+        return "\n".join(results) if results else "No live search results found."
+    except Exception as e:
+        return f"Error during live search execution: {str(e)}"
+
+def real_web_fetch(url: str) -> str:
+    """Fetch a real URL, scrape the main text body, and truncate cleanly."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; ResearchBot/1.0)"}
+        response = requests.get(url, headers=headers, allow_redirects=True, timeout=10)
+        response.raise_for_status()
+        
+        text = trafilatura.extract(response.text, include_comments=False, include_tables=True)
+        if not text:
+            return "Error: Could not extract readable text body from this webpage."
+            
+        return text[:6000] + "\n\n[...Content truncated to save context budget...]" if len(text) > 6000 else text
+    except Exception as e:
+        return f"Error trying to fetch webpage: {str(e)}"
+
+# --- TOOL BLUEPRINTS ---
+
+final_tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "real_web_search",
+            "description": "Search Google for live, current information, real-time facts, or recent events.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "The specific target search query."}
+                },
+                "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "real_web_fetch",
+            "description": "Fetch and read the full text content of a specific URL discovered from search results.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "The complete HTTP or HTTPS URL."}
+                },
+                "required": ["url"],
+            },
+        },
+    },
+]
+
+# --- THE INTERFACE LAYOUT ---
+
+class PerplexityApp(App):
+    CSS = """
+    Horizontal {
+        height: 1fr;
+    }
+    #chat-panel {
+        width: 60%;
+        border: solid $primary;
+        background: $background;
+    }
+    #tool-panel {
+        width: 40%;
+        border: solid $warning;
+        background: $background;
+    }
+    Input {
+        dock: bottom;
+        height: 3;
+    }
+    """
+    
+    BINDINGS = [
+        Binding("f1", "clear_display", "Clear Screen"),
+        Binding("f2", "clear_history", "Wipe Memory"),
+        Binding("escape", "quit", "Quit Application"),
+    ]
+    
+    def compose(self) -> ComposeResult:
+        yield Header(show_clock=True)
+        with Horizontal():
+            yield RichLog(id="chat-panel", wrap=True, markup=True)
+            yield RichLog(id="tool-panel", wrap=True, markup=True)
+        yield Input(placeholder="Ask anything...")
+        yield Footer()
+        
+    def on_mount(self) -> None:
+        self.chat_log = self.query_one("#chat-panel", RichLog)
+        self.tool_log = self.query_one("#tool-panel", RichLog)
+        self.chat_log.write("[bold cyan]🔍 Perplexity Research Terminal Online.[/bold cyan]\n")
+        self.tool_log.write("[bold yellow]🛠️ Live Tool Execution Stream Active.[/bold yellow]\n")
+        
+        self.conversation_history = [
+            {
+                "role": "system", 
+                "content": "You are a professional research agent with live web search powers. Use search tools when asked about current facts or weather. Remember past user inputs in the conversation history. Summarize findings with clear markdown."
+            }
+        ]
+        # Add this right below your conversation_history array
+        self.session_tokens = 0
+        
+    def on_input_submitted(self, event: Input.Submitted) -> None:
+        user_text = event.value.strip()
+        if not user_text:
+            return
+            
+        self.chat_log.write(f"[bold blue]You:[/bold blue] {user_text}")
+        event.input.clear()
+        
+        self.conversation_history.append({"role": "user", "content": user_text})
+        self.run_worker(self.run_perplexity_loop(), thread=True)
+
+    async def run_perplexity_loop(self):
+        """Executes the autonomous loop over the shared persistent history."""
+        for iteration in range(6):
+            response = client.chat.completions.create(
+                model="openrouter/free",
+                messages=self.conversation_history,
+                tools=final_tools,
+            )
+            
+            # --- NEW API SAFETY GUARD ---
+            if not response.choices:
+                error_info = getattr(response, "error", "Unknown API Error. The model might be overloaded.")
+                self.call_from_thread(self.chat_log.write, f"\n[bold red]Network Error:[/bold red] {error_info}\n")
+                return
+            # ----------------------------
+            
+            message = response.choices[0].message
+            self.conversation_history.append(message)
+            
+            if response.usage:
+                turn_tokens = response.usage.total_tokens
+                self.session_tokens += turn_tokens
+                self.call_from_thread(
+                    self.tool_log.write, 
+                    f"[bold magenta]🪙 Token Usage ➔ This turn: {turn_tokens} | Session Total: {self.session_tokens}[/bold magenta]"
+                )
+
+            if not message.tool_calls:
+                self.call_from_thread(self.chat_log.write, f"\n[bold green]Perplexity Engine:[/bold green] {message.content}\n")
+                return
+                
+            for tool_call in message.tool_calls:
+                tool_name = tool_call.id if not tool_call.function.name else tool_call.function.name
+                args = json.loads(tool_call.function.arguments)
+                
+                self.call_from_thread(self.tool_log.write, f"[bold yellow]⚡ RUNNING TOOL:[/bold yellow] {tool_name}({args})")
+                
+                if tool_name == "real_web_search":
+                    tool_result = real_web_search(args.get("query"))
+                elif tool_name == "real_web_fetch":
+                    tool_result = real_web_fetch(args.get("url"))
+                else:
+                    tool_result = "Error: Requested tool function not found."
+                    
+                # Safe preview execution check
+                if tool_result is None:
+                    tool_result = "Error: Tool execution returned nothing (None)."
+                
+                preview = tool_result[:200].replace('\n', ' ') + "..." if len(tool_result) > 200 else tool_result.replace('\n', ' ')
+                self.call_from_thread(self.tool_log.write, f"[dim]➔ Tool returned: {preview}[/dim]\n")
+                
+                self.conversation_history.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": tool_result,
+                })
+        
+    def action_clear_display(self) -> None:
+        self.chat_log.clear()
+        self.tool_log.clear()
+
+    def action_clear_history(self) -> None:
+        self.chat_log.clear()
+        self.tool_log.clear()
+        self.conversation_history = [
+            {"role": "system", "content": "You are a professional research agent with live web search powers. Use search tools when asked about current facts or weather. Summarize findings with clear markdown."}
+        ]
+        self.session_tokens = 0  # <-- ADD THIS LINE
+        self.chat_log.write("[bold cyan]🧹 Memory wiped clean and screen reset. Fresh conversation started![/bold cyan]\n")
+
+if __name__ == "__main__":
+    app = PerplexityApp()
+    app.run()

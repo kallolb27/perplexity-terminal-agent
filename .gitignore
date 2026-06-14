@@ -1,0 +1,10 @@
+FULL_PLAN.md
+week_2/RUBRIC.md
+.env
+
+# Python Cache
+__pycache__/
+*.pyc
+
+# Output files from your agent
+output/
