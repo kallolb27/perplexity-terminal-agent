@@ -2,9 +2,9 @@
 FULL_PLAN.md
 week_2/RUBRIC.md
 week_3/README.md
-week_3/memory.md
-week_3/_agent_class.md
-week_3/_paper_tools.md
+week_3/1_memory.md
+week_3/2_agent_class.md
+week_3/3_paper_tools.md
 
 # Agent Local Data
 .agent/
