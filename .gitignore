@@ -1,10 +1,19 @@
+# Course Instructions / Unneeded Markdown
 FULL_PLAN.md
 week_2/RUBRIC.md
+week_3/README.md
+week_3/memory.md
+week_3/_agent_class.md
+week_3/_paper_tools.md
+
+# Agent Local Data
+.agent/
+notes/
+output/
+
+# Environments (CRITICAL)
 .env
 
-# Python Cache
+# Python Caches
 __pycache__/
 *.pyc
-
-# Output files from your agent
-output/
