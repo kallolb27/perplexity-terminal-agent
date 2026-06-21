@@ -17,3 +17,15 @@ output/
 # Python Caches
 __pycache__/
 *.pyc
+
+# Log Files (Just in case any leak out of the .agent folder)
+*.log
+
+# Python Virtual Environments (Standard Best Practice)
+venv/
+.venv/
+env/
+
+# OS Generated Files
+.DS_Store
+Thumbs.db
